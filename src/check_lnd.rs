@@ -10,7 +10,7 @@ async fn update_settled_invoice(pool: &Pool<Postgres>, invoice: &Invoice) -> Lig
     let transaction = sqlx::query_as::<_,Transaction>( "SELECT * FROM lightningchess_transaction WHERE payment_addr=$1")
         .bind(&invoice.payment_addr)
         .fetch_one(pool).await?;
-    println!("transaction: {}", serde_json::to_string(&t).unwrap());
+    println!("transaction: {}", serde_json::to_string(&transaction).unwrap());
 
     // update
     let mut tx = pool.begin().await?;
@@ -61,33 +61,40 @@ pub async fn subscribe_invoices() {
                 let mut still_chunky = true;
                 let mut invoice_str = "".to_owned();
                 while still_chunky {
-                    let maybe_bytes = res.chunk().await?;
-                    match maybe_bytes {
-                        Some(bytes) => {
-                            println!("bytes: {:?}", bytes);
-                            let chunk = from_utf8(&bytes).unwrap();
-                            println!("chunk: {}", chunk);
-                            invoice_str.push_str(chunk);
-                            println!("invoice str = {}", &invoice_str);
-                            if chunk.ends_with("\n") {
-                                println!("End of invoice");
-                                let invoice_result: InvoiceResult = serde_json::from_str(&invoice_str).unwrap();
-                                // if result is settled update db
-                                if invoice_result.result.state == "SETTLED" {
-                                    let db_update_result = update_settled_invoice(&pool, &invoice_result.result).await;
-                                    match db_update_result {
-                                        Ok(_) => (),
-                                        Err(e) => println!("Error db update result {}", e)
-                                    }
-                                }
+                    let res_bytes = res.chunk().await;
+                    match res_bytes {
+                        Ok(maybe_bytes) => {
+                            match maybe_bytes {
+                                Some(bytes) => {
+                                    println!("bytes: {:?}", bytes);
+                                    let chunk = from_utf8(&bytes).unwrap();
+                                    println!("chunk: {}", chunk);
+                                    invoice_str.push_str(chunk);
+                                    println!("invoice str = {}", &invoice_str);
+                                    if chunk.ends_with("\n") {
+                                        println!("End of invoice");
+                                        let invoice_result: InvoiceResult = serde_json::from_str(&invoice_str).unwrap();
+                                        // if result is settled update db
+                                        if invoice_result.result.state == "SETTLED" {
+                                            let db_update_result = update_settled_invoice(&pool, &invoice_result.result).await;
+                                            match db_update_result {
+                                                Ok(_) => (),
+                                                Err(e) => println!("Error db update result {}", e)
+                                            }
+                                        }
 
-                                // after done reset chunky str
-                                invoice_str = "".to_string()
+                                        // after done reset chunky str
+                                        invoice_str = "".to_string()
+                                    }
+                                },
+                                None => {
+                                    println!("No chonks");
+                                    still_chunky = false;
+                                }
                             }
-                        },
-                        None => {
-                            println!("No chonks");
-                            still_chunky = false;
+                        }
+                        Err(e) => {
+                            println!("error chonking {}", e);
                         }
                     }
                 }
