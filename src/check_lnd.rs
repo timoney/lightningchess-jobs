@@ -3,74 +3,40 @@ use std::str::from_utf8;
 use reqwest::Client;
 use sqlx::{Pool, Postgres};
 use sqlx::postgres::PgPoolOptions;
-use crate::models::{Invoice, InvoiceResult, Transaction};
+use crate::models::{Invoice, InvoiceResult, LightningChessResult, Transaction};
 
-async fn update_settled_invoice(pool: &Pool<Postgres>, invoice: &Invoice) {
+async fn update_settled_invoice(pool: &Pool<Postgres>, invoice: &Invoice) -> LightningChessResult<bool> {
     // look up in database
-    let transaction_result = sqlx::query_as::<_,Transaction>( "SELECT * FROM lightningchess_transaction WHERE payment_addr=$1")
+    let transaction = sqlx::query_as::<_,Transaction>( "SELECT * FROM lightningchess_transaction WHERE payment_addr=$1")
         .bind(&invoice.payment_addr)
-        .fetch_one(pool).await;
+        .fetch_one(pool).await?;
+    println!("transaction: {}", serde_json::to_string(&t).unwrap());
 
-    let transaction = match transaction_result {
-        Ok(t) => {
-            println!("transaction: {}", serde_json::to_string(&t).unwrap());
-            t
-        },
-        Err(e) => {
-            println!("error: {}", e);
-            return;
-        }
-    };
+    // update
+    let mut tx = pool.begin().await?;
+    println!("created tx");
 
-    // // update
-    let tx_result = pool.begin().await;
-    let mut tx = match tx_result {
-        Ok(t) => t,
-        Err(e) => {
-            println!("error creating tx: {}", e);
-            return;
-        }
-    };
-    //
-    // // update transaction table
+    // update transaction table
     let amount = invoice.amt_paid_sat.parse::<i64>().unwrap();
-    let updated_transaction = sqlx::query( "UPDATE lightningchess_transaction SET state='SETTLED', amount=$1 WHERE transaction_id=$2")
+    sqlx::query( "UPDATE lightningchess_transaction SET state='SETTLED', amount=$1 WHERE transaction_id=$2")
         .bind(&amount)
         .bind(&transaction.transaction_id)
-        .execute(&mut tx).await;
-
-    match updated_transaction {
-        Ok(_) => println!("successfully updated_transaction transaction id {}", transaction.transaction_id),
-        Err(e) => {
-            println!("error updated_transaction transaction id : {}, {}", transaction.transaction_id, e);
-            return;
-        }
-    }
+        .execute(&mut tx).await?;
+    println!("updated transaction");
 
     // update balance table
-    let updated_balance = sqlx::query( "INSERT INTO lightningchess_balance (username, balance) VALUES ($1, $2) ON CONFLICT (username) DO UPDATE SET balance=lightningchess_balance.balance + $3 WHERE lightningchess_balance.username=$4")
+    sqlx::query( "INSERT INTO lightningchess_balance (username, balance) VALUES ($1, $2) ON CONFLICT (username) DO UPDATE SET balance=lightningchess_balance.balance + $3 WHERE lightningchess_balance.username=$4")
         .bind(&transaction.username)
         .bind(&amount)
         .bind(&amount)
         .bind(&transaction.username)
-        .execute(&mut tx).await;
+        .execute(&mut tx).await?;
+    println!("updated balance");
 
-    match updated_balance {
-        Ok(_) => println!("successfully updated_balance transaction id {}", transaction.transaction_id),
-        Err(e) => {
-            println!("error updated_balance transaction id : {}, {}", transaction.transaction_id, e);
-            return;
-        }
-    }
     // commit
-    let commit_result = tx.commit().await;
-    match commit_result {
-        Ok(_) => println!("successfully committed transaction id {}", transaction.transaction_id),
-        Err(_) => {
-            println!("error committing transaction id : {}", transaction.transaction_id);
-            return;
-        }
-    }
+    tx.commit().await?;
+    println!("committed");
+    Ok(true)
 }
 
 pub async fn subscribe_invoices() {
@@ -95,34 +61,32 @@ pub async fn subscribe_invoices() {
                 let mut still_chunky = true;
                 let mut invoice_str = "".to_owned();
                 while still_chunky {
-                    let chunk_result = res.chunk().await;
-                    match chunk_result {
-                        Ok(maybe_bytes) => match maybe_bytes {
-                            Some(bytes) => {
-                                println!("bytes: {:?}", bytes);
-                                let chunk = from_utf8(&bytes).unwrap();
-                                println!("chunk: {}", chunk);
-                                invoice_str.push_str(chunk);
-                                println!("invoice str = {}", &invoice_str);
-                                if chunk.ends_with("\n") {
-                                    println!("End of invoice");
-                                    let invoice_result: InvoiceResult = serde_json::from_str(&invoice_str).unwrap();
-                                    // if result is settled update db
-                                    if invoice_result.result.state == "SETTLED" {
-                                        update_settled_invoice(&pool, &invoice_result.result).await;
+                    let maybe_bytes = res.chunk().await?;
+                    match maybe_bytes {
+                        Some(bytes) => {
+                            println!("bytes: {:?}", bytes);
+                            let chunk = from_utf8(&bytes).unwrap();
+                            println!("chunk: {}", chunk);
+                            invoice_str.push_str(chunk);
+                            println!("invoice str = {}", &invoice_str);
+                            if chunk.ends_with("\n") {
+                                println!("End of invoice");
+                                let invoice_result: InvoiceResult = serde_json::from_str(&invoice_str).unwrap();
+                                // if result is settled update db
+                                if invoice_result.result.state == "SETTLED" {
+                                    let db_update_result = update_settled_invoice(&pool, &invoice_result.result).await;
+                                    match db_update_result {
+                                        Ok(_) => (),
+                                        Err(e) => println!("Error db update result {}", e)
                                     }
-
-                                    // after done reset chunky str
-                                    invoice_str = "".to_string()
                                 }
-                            },
-                            None => {
-                                println!("No chonks");
-                                still_chunky = false;
+
+                                // after done reset chunky str
+                                invoice_str = "".to_string()
                             }
                         },
-                        Err(e) => {
-                            println!("No more chunks error{}", e);
+                        None => {
+                            println!("No chonks");
                             still_chunky = false;
                         }
                     }

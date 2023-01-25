@@ -5,12 +5,12 @@ use sqlx::{Pool, Postgres};
 use sqlx::postgres::PgPoolOptions;
 use crate::models::{Challenge, LightningChessResult, LichessExportGameResponse};
 
-async fn check(pool: Pool<Postgres>) -> LightningChessResult<usize> {
+async fn check(pool: &Pool<Postgres>) -> LightningChessResult<usize> {
     let admin = env::var("ADMIN_ACCOUNT").unwrap();
 
     // look up all the challenges in ACCEPTED status
     let challenges = sqlx::query_as::<_,Challenge>( "SELECT * FROM challenge WHERE STATUS='ACCEPTED' ORDER BY created_on DESC LIMIT 1000")
-        .fetch_all(&pool).await?;
+        .fetch_all(pool).await?;
 
     let num_challenges = challenges.len();
     println!("num_challenges: {}", num_challenges);
@@ -162,7 +162,7 @@ pub async fn check_lichess_games() -> () {
     let mut loop_count = 1;
     loop {
         println!("starting loop {}", loop_count);
-        let check_result = check(pool.to_owned()).await;
+        let check_result = check(&pool).await;
         let sleep_secs = match check_result {
             Ok(num_games_checked) => {
                 println!("checked {} games", num_games_checked);
