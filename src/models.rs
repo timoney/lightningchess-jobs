@@ -1,6 +1,10 @@
+use std::error;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow};
 use chrono::NaiveDateTime;
+
+
+pub type LightningChessResult<T> = Result<T, Box<dyn error::Error>>;
 
 fn default_string() -> String {
     "".to_string()
@@ -63,7 +67,7 @@ pub struct Invoice {
     pub state: String
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct LichessExportGameResponse {
     pub id: String,
     pub rated: bool,
