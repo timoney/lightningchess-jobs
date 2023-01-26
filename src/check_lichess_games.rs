@@ -193,19 +193,19 @@ pub async fn check_lichess_games() -> () {
     let mut expired_challenges: HashMap<String, i32> = HashMap::new();
     loop {
         println!("starting loop {}", loop_count);
-        let check_result = check(&pool, &mut expired_challenges).await;
-        let sleep_secs = match check_result {
-            Ok(num_games_checked) => {
-                println!("checked {} games", num_games_checked);
-                if num_games_checked > 0 { 60 } else { 180 }
-            },
-            Err(e) => {
-                println!("Error checking games {}", e);
-                60
-            }
-        };
+        let _check_result = check(&pool, &mut expired_challenges).await;
+        // let sleep_secs = match check_result {
+        //     Ok(num_games_checked) => {
+        //         println!("checked {} games", num_games_checked);
+        //         if num_games_checked > 0 { 60 } else { 180 }
+        //     },
+        //     Err(e) => {
+        //         println!("Error checking games {}", e);
+        //         60
+        //     }
+        // };
         // sleep longer if there are no currently open
-        let duration = Duration::from_secs(sleep_secs);
+        let duration = Duration::from_secs(60);
 
         println!("sleeping for {duration:?}");
         sleep(duration).await;
