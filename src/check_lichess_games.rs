@@ -1,8 +1,9 @@
 use std::{env};
+use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use reqwest::{Client};
-use sqlx::{Pool, Postgres};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{Error, Pool, Postgres};
+use sqlx::postgres::{PgPoolOptions, PgQueryResult};
 use crate::models::{Challenge, LightningChessResult, LichessExportGameResponse};
 
 fn get_winner_username(challenge: &Challenge, winner: &str) -> String {
@@ -21,7 +22,37 @@ fn calculate_fee_per_person(challenge: &Challenge) -> i64 {
     initial_fee.floor() as i64
 }
 
-async fn check(pool: &Pool<Postgres>) -> LightningChessResult<usize> {
+async fn insert_tx(tx: &mut sqlx::Transaction<'_, Postgres>,
+                            username: &String,
+                            ttype: &String,
+                            detail: &String,
+                            amount: i64,
+                            state: &String,
+                            lichess_challenge_id: &String) -> Result<PgQueryResult, Error>{
+    sqlx::query( "INSERT INTO lightningchess_transaction (username, ttype, detail, amount, state, lichess_challenge_id) VALUES ($1, $2, $3, $4, $5, $6)")
+        .bind(username)
+        .bind(ttype)
+        .bind(detail)
+        .bind(amount)
+        .bind(state)
+        .bind(lichess_challenge_id)
+        .execute(tx).await
+}
+
+async fn add_to_balance(tx: &mut sqlx::Transaction<'_, Postgres>, username: &String, amt: i64) -> Result<PgQueryResult, Error> {
+    sqlx::query( "UPDATE lightningchess_balance set balance=balance + $1 WHERE username=$2")
+        .bind(amt)
+        .bind(username)
+        .execute(tx).await
+}
+
+async fn mark_challenge_completed(tx: &mut sqlx::Transaction<'_, Postgres>, challenge_id: i32) -> Result<Challenge, Error> {
+    sqlx::query_as::<_,Challenge>("UPDATE challenge SET status='COMPLETED' WHERE id=$1 RETURNING *")
+        .bind(challenge_id)
+        .fetch_one(tx).await
+}
+
+async fn check(pool: &Pool<Postgres>, expired_challenges: &mut HashMap<String, i32>) -> LightningChessResult<usize> {
     let admin = env::var("ADMIN_ACCOUNT").unwrap();
 
     // look up all the challenges in ACCEPTED status
@@ -34,16 +65,50 @@ async fn check(pool: &Pool<Postgres>) -> LightningChessResult<usize> {
     // check in lichess if there are any updates
     for challenge in challenges.iter() {
         println!("processing challenge {}", serde_json::to_string(challenge).unwrap());
-
-        let url = format!("https://lichess.org/game/export/{}", &challenge.lichess_challenge_id.as_ref().unwrap());
+        let lichess_challenge_id = challenge.lichess_challenge_id.as_ref().unwrap();
+        let url = format!("https://lichess.org/game/export/{}", lichess_challenge_id);
         let resp = Client::new()
             .get(url)
             .header("Accept", "application/json")
             .send().await?;
 
+        let fee_per_person = calculate_fee_per_person(challenge);
+        let total_fee = fee_per_person * 2;
+
+        let mut tx = pool.begin().await?;
+
         if resp.status().as_u16() == 404 {
-            println!("404 continuing...");
-            // should consider this a draw after 30min
+            println!("404 game found for {}", lichess_challenge_id);
+            let count = expired_challenges.entry(lichess_challenge_id.to_string()).or_insert(1);
+            println!("count {count}");
+            // if we get 404 for 30 cycles, mark as COMPLETED in draw
+            if count > &mut 30 {
+                println!("expired challenge {}. setting draw", lichess_challenge_id);
+                let expired_ttype = "expired".to_string();
+                let expired_detail = format!("sats returned for expired game");
+                let expired_amt = challenge.sats.unwrap();
+                let expired_state = "SETTLED".to_string();
+                println!("insert expired transaction 1");
+                insert_tx(&mut tx, &challenge.username, &expired_ttype, &expired_detail, expired_amt, &expired_state, lichess_challenge_id).await?;
+
+                println!("update expired balance 1");
+                add_to_balance(&mut tx, &challenge.username, expired_amt).await?;
+
+                println!("insert expired transaction 2");
+                insert_tx(&mut tx, &challenge.opp_username, &expired_ttype, &expired_detail, expired_amt, &expired_state, lichess_challenge_id).await?;
+
+                println!("update expired balance 2");
+                add_to_balance(&mut tx, &challenge.opp_username, expired_amt).await?;
+
+                mark_challenge_completed(&mut tx, challenge.id).await?;
+                println!("update challenge succeeded");
+
+                tx.commit().await?;
+                println!("committed");
+            } else {
+                *count += 1;
+            }
+
             continue;
         }
 
@@ -58,104 +123,56 @@ async fn check(pool: &Pool<Postgres>) -> LightningChessResult<usize> {
 
         let challenge_lichess_result = lichess_export_game_response.status;
         if challenge_lichess_result == "created" || challenge_lichess_result == "started" {
-            println!("challenge not over yet {}", &challenge.lichess_challenge_id.as_ref().unwrap());
+            println!("challenge not over yet {}", lichess_challenge_id);
             continue;
         }
 
-        let fee_per_person = calculate_fee_per_person(challenge);
-        println!("fee per person{}", fee_per_person);
-        let total_fee = fee_per_person * 2;
-
-        let mut tx = pool.begin().await?;
-
         // pay admin
-        let admin_ttype = "fee";
+        let admin_ttype = "fee".to_string();
         let admin_detail = format!("fee from challenge {}", challenge.id);
-        let admin_state = "SETTLED";
-        sqlx::query( "INSERT INTO lightningchess_transaction (username, ttype, detail, amount, state, lichess_challenge_id) VALUES ($1, $2, $3, $4, $5, $6)")
-            .bind(&admin)
-            .bind(admin_ttype)
-            .bind(admin_detail)
-            .bind(total_fee)
-            .bind(admin_state)
-            .bind(&challenge.lichess_challenge_id.as_ref().unwrap())
-            .execute(&mut tx).await?;
+        let admin_state = "SETTLED".to_string();
         println!("insert admin transaction");
+        insert_tx(&mut tx, &admin, &admin_ttype, &admin_detail, total_fee, &admin_state, lichess_challenge_id).await?;
 
-        sqlx::query( "UPDATE lightningchess_balance set balance=balance + $1 WHERE username=$2")
-            .bind(total_fee)
-            .bind(&admin)
-            .execute(&mut tx).await?;
         println!("update admin balance");
+        add_to_balance(&mut tx, &admin, total_fee).await?;
 
         let winner = lichess_export_game_response.winner.get_or_insert("".to_string());
         if winner == "black" || winner == "white" {
             // pay money to winner
             let winner_username = get_winner_username(&challenge, winner);
-            let winner_ttype = "winnings";
-            let winner_detail = "";
+            let winner_ttype = "winnings".to_string();
+            let winner_detail = format!("lichess game https://lichess.org/{}", lichess_challenge_id);
             let winning_amt = (&challenge.sats.unwrap() * 2) - total_fee;
-            let winner_state = "SETTLED";
-            sqlx::query( "INSERT INTO lightningchess_transaction (username, ttype, detail, amount, state) VALUES ($1, $2, $3, $4, $5)")
-                .bind(&winner_username)
-                .bind(winner_ttype)
-                .bind(winner_detail)
-                .bind(winning_amt)
-                .bind(winner_state)
-                .execute(&mut tx).await?;
+            let winner_state = "SETTLED".to_string();
             println!("insert winner transaction");
+            insert_tx(&mut tx, &winner_username, &winner_ttype, &winner_detail, winning_amt, &winner_state, lichess_challenge_id).await?;
 
-            sqlx::query( "UPDATE lightningchess_balance set balance=balance + $1 WHERE username=$2")
-                .bind(winning_amt)
-                .bind(&winner_username)
-                .execute(&mut tx).await?;
             println!("update winner balance");
+            add_to_balance(&mut tx, &winner_username, winning_amt).await?;
         } else {
             // no winner so return money to both people
-            let draw_ttype = "draw";
-            let draw_detail = "initial sats amount minus 2% fee";
+            let draw_ttype = "draw".to_string();
+            let draw_detail = format!("lichess game https://lichess.org/{}. initial sats minus 2% fee", lichess_challenge_id);
             let draw_amt = &challenge.sats.unwrap() - fee_per_person;
-            let draw_state = "SETTLED";
-            sqlx::query( "INSERT INTO lightningchess_transaction (username, ttype, detail, amount, state) VALUES ($1, $2, $3, $4, $5)")
-                .bind(&challenge.username)
-                .bind(draw_ttype)
-                .bind(draw_detail)
-                .bind(draw_amt)
-                .bind(draw_state)
-                .execute(&mut tx).await?;
+            let draw_state = "SETTLED".to_string();
             println!("insert draw transaction 1");
+            insert_tx(&mut tx, &challenge.username, &draw_ttype, &draw_detail, draw_amt, &draw_state, lichess_challenge_id).await?;
 
-            sqlx::query( "UPDATE lightningchess_balance set balance=balance + $1 WHERE username=$2")
-                .bind(draw_amt)
-                .bind(&challenge.username)
-                .execute(&mut tx).await?;
             println!("update draw balance 1");
+            add_to_balance(&mut tx, &challenge.username, draw_amt).await?;
 
-            sqlx::query( "INSERT INTO lightningchess_transaction (username, ttype, detail, amount, state) VALUES ($1, $2, $3, $4, $5)")
-                .bind(&challenge.opp_username)
-                .bind(draw_ttype)
-                .bind(draw_detail)
-                .bind(draw_amt)
-                .bind(draw_state)
-                .execute(&mut tx).await?;
             println!("insert draw transaction 2");
+            insert_tx(&mut tx, &challenge.opp_username, &draw_ttype, &draw_detail, draw_amt, &draw_state, lichess_challenge_id).await?;
 
-            sqlx::query( "UPDATE lightningchess_balance set balance=balance + $1 WHERE username=$2")
-                .bind(draw_amt)
-                .bind(&challenge.opp_username)
-                .execute(&mut tx).await?;
             println!("update draw balance 2");
+            add_to_balance(&mut tx, &challenge.opp_username, draw_amt).await?;
         }
 
         // mark challenge as completed
-        let status = "COMPLETED";
-        sqlx::query_as::<_,Challenge>("UPDATE challenge SET status=$1 WHERE id=$2 RETURNING *")
-            .bind(status)
-            .bind(&challenge.id)
-            .fetch_one(&mut tx).await?;
+        mark_challenge_completed(&mut tx, challenge.id).await?;
         println!("update challenge succeeded");
 
-        // commit transaction
         tx.commit().await?;
         println!("committed");
     }
@@ -173,13 +190,14 @@ pub async fn check_lichess_games() -> () {
         .await.unwrap();
 
     let mut loop_count = 1;
+    let mut expired_challenges: HashMap<String, i32> = HashMap::new();
     loop {
         println!("starting loop {}", loop_count);
-        let check_result = check(&pool).await;
+        let check_result = check(&pool, &mut expired_challenges).await;
         let sleep_secs = match check_result {
             Ok(num_games_checked) => {
                 println!("checked {} games", num_games_checked);
-                if num_games_checked > 0 { 60 } else { 120 }
+                if num_games_checked > 0 { 60 } else { 180 }
             },
             Err(e) => {
                 println!("Error checking games {}", e);
