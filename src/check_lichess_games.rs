@@ -1,9 +1,11 @@
 use std::{env};
 use std::collections::HashMap;
+use chrono::NaiveDateTime;
 use tokio::time::{sleep, Duration};
 use reqwest::{Client};
 use sqlx::{Error, Pool, Postgres};
 use sqlx::postgres::{PgPoolOptions, PgQueryResult};
+use chrono::prelude::Utc;
 use crate::models::{Challenge, LightningChessResult, LichessExportGameResponse};
 
 fn get_winner_username(challenge: &Challenge, winner: &str) -> String {
@@ -180,6 +182,54 @@ async fn check(pool: &Pool<Postgres>, expired_challenges: &mut HashMap<String, i
     Ok(num_challenges)
 }
 
+async fn check_expired(pool: &Pool<Postgres>) -> LightningChessResult<usize> {
+    // look up all the challenges in ACCEPTED status
+    let challenges = sqlx::query_as::<_,Challenge>( "SELECT * FROM challenge WHERE STATUS='WAITING FOR ACCEPTANCE' ORDER BY created_on DESC LIMIT 1000")
+        .fetch_all(pool).await?;
+
+    let num_challenges = challenges.len();
+    println!("num_challenges: {}", num_challenges);
+
+    // unix time
+    let current_seconds = Utc::now().timestamp();
+    for challenge in challenges.iter() {
+        println!("processing challenge {}", serde_json::to_string(challenge).unwrap());
+        let mut tx = pool.begin().await?;
+        let created_on: NaiveDateTime = challenge.created_on.unwrap();
+        let challenge_seconds = created_on.timestamp();
+        let diff_seconds = &current_seconds - challenge_seconds;
+        let challenge_id= &challenge.id;
+        println!("challenge: {challenge_id} diff_seconds: {diff_seconds}");
+        // 30 min to seconds = 1800
+        if diff_seconds > 1_800 {
+            println!("setting challenge to expired");
+            let expired_ttype = "expired".to_string();
+            let expired_detail = format!("sats returned for expired game");
+            let expired_amt = challenge.sats.unwrap();
+            let expired_state = "SETTLED".to_string();
+            let lichess_id = "none. expired".to_string();
+            println!("insert expired transaction 1");
+            insert_tx(&mut tx, &challenge.username, &expired_ttype, &expired_detail, expired_amt, &expired_state, &lichess_id).await?;
+
+            println!("update expired balance 1");
+            add_to_balance(&mut tx, &challenge.username, expired_amt).await?;
+
+            println!("insert expired transaction 2");
+            insert_tx(&mut tx, &challenge.opp_username, &expired_ttype, &expired_detail, expired_amt, &expired_state, &lichess_id).await?;
+
+            println!("update expired balance 2");
+            add_to_balance(&mut tx, &challenge.opp_username, expired_amt).await?;
+
+            mark_challenge_completed(&mut tx, challenge.id).await?;
+            println!("update challenge succeeded");
+
+            tx.commit().await?;
+            println!("committed");
+        }
+    }
+    Ok(num_challenges)
+}
+
 pub async fn check_lichess_games() -> () {
     println!("Starting to check lichess!");
     let db_url = env::var("DB_URL").unwrap();
@@ -194,17 +244,7 @@ pub async fn check_lichess_games() -> () {
     loop {
         println!("starting loop {}", loop_count);
         let _check_result = check(&pool, &mut expired_challenges).await;
-        // let sleep_secs = match check_result {
-        //     Ok(num_games_checked) => {
-        //         println!("checked {} games", num_games_checked);
-        //         if num_games_checked > 0 { 60 } else { 180 }
-        //     },
-        //     Err(e) => {
-        //         println!("Error checking games {}", e);
-        //         60
-        //     }
-        // };
-        // sleep longer if there are no currently open
+        let _check_expired_result = check_expired(&pool).await;
         let duration = Duration::from_secs(60);
 
         println!("sleeping for {duration:?}");
