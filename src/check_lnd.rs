@@ -6,15 +6,14 @@ use sqlx::postgres::PgPoolOptions;
 use crate::models::{Invoice, InvoiceResult, LightningChessResult, Transaction};
 
 async fn update_settled_invoice(pool: &Pool<Postgres>, invoice: &Invoice) -> LightningChessResult<bool> {
-    // look up in database
-    let transaction = sqlx::query_as::<_,Transaction>( "SELECT * FROM lightningchess_transaction WHERE payment_addr=$1")
-        .bind(&invoice.payment_addr)
-        .fetch_one(pool).await?;
-    println!("transaction: {}", serde_json::to_string(&transaction).unwrap());
-
-    // update
     let mut tx = pool.begin().await?;
     println!("created tx");
+
+    // look up in database
+    let transaction = sqlx::query_as::<_,Transaction>( "SELECT * FROM lightningchess_transaction WHERE payment_addr=$1 FOR UPDATE")
+        .bind(&invoice.payment_addr)
+        .fetch_one(&mut tx).await?;
+    println!("transaction: {}", serde_json::to_string(&transaction).unwrap());
 
     // update transaction table
     let amount = invoice.amt_paid_sat.parse::<i64>().unwrap();
