@@ -5,7 +5,7 @@ use sqlx::{Pool, Postgres};
 use sqlx::postgres::PgPoolOptions;
 use crate::models::{Invoice, InvoiceResult, LightningChessResult, Transaction};
 
-async fn update_settled_invoice(pool: &Pool<Postgres>, invoice: &Invoice) -> LightningChessResult<bool> {
+pub async fn update_settled_invoice(pool: &Pool<Postgres>, invoice: &Invoice) -> LightningChessResult<bool> {
     let mut tx = pool.begin().await?;
     println!("created tx");
 

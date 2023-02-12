@@ -27,7 +27,8 @@ pub struct Transaction {
     pub payment_addr: Option<String>, // base64 encoded
     pub payment_request: Option<String>,
     pub payment_hash: Option<String>,
-    pub lichess_challenge_id: Option<String>
+    pub lichess_challenge_id: Option<String>,
+    pub created_on: Option<NaiveDateTime>
 }
 
 #[derive(Serialize, Deserialize, FromRow)]
@@ -76,4 +77,17 @@ pub struct LichessExportGameResponse {
     pub perf: String,
     pub status: String,
     pub winner: Option<String>
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LookupInvoiceResponse {
+    pub memo: String,
+    pub value: String,
+    pub settled: bool,
+    pub creation_date: String,
+    pub settle_date: String,
+    pub payment_request: String,
+    pub expiry: String,
+    pub amt_paid_sat: String,
+    pub state: String
 }

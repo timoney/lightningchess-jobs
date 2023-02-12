@@ -54,6 +54,12 @@ async fn mark_challenge_completed(tx: &mut sqlx::Transaction<'_, Postgres>, chal
         .fetch_one(tx).await
 }
 
+async fn mark_challenge_expired(tx: &mut sqlx::Transaction<'_, Postgres>, challenge_id: i32) -> Result<Challenge, Error> {
+    sqlx::query_as::<_,Challenge>("UPDATE challenge SET status='EXPIRED' WHERE id=$1 RETURNING *")
+        .bind(challenge_id)
+        .fetch_one(tx).await
+}
+
 async fn check(pool: &Pool<Postgres>, expired_challenges: &mut HashMap<String, i32>) -> LightningChessResult<usize> {
     let admin = env::var("ADMIN_ACCOUNT").unwrap();
 
@@ -220,7 +226,7 @@ async fn check_expired(pool: &Pool<Postgres>) -> LightningChessResult<usize> {
             println!("update expired balance 2");
             add_to_balance(&mut tx, &challenge.opp_username, expired_amt).await?;
 
-            mark_challenge_completed(&mut tx, challenge.id).await?;
+            mark_challenge_expired(&mut tx, challenge.id).await?;
             println!("update challenge succeeded");
 
             tx.commit().await?;
@@ -230,8 +236,8 @@ async fn check_expired(pool: &Pool<Postgres>) -> LightningChessResult<usize> {
     Ok(num_challenges)
 }
 
-pub async fn check_lichess_games() -> () {
-    println!("Starting to check lichess!");
+pub async fn db_checks() -> () {
+    println!("Starting db checks!");
     let db_url = env::var("DB_URL").unwrap();
 
     let pool = PgPoolOptions::new()
@@ -242,9 +248,16 @@ pub async fn check_lichess_games() -> () {
     let mut loop_count = 1;
     let mut expired_challenges: HashMap<String, i32> = HashMap::new();
     loop {
-        println!("starting loop {}", loop_count);
+        println!("starting db checks loop {}", loop_count);
+        // checks lichess to see if the game has finished
         let _check_result = check(&pool, &mut expired_challenges).await;
+
+        // checks challenges to see if any have expired in 30min
         let _check_expired_result = check_expired(&pool).await;
+
+        // makes sure that streaming didn't miss any invoices
+        //let _check_invoices = reconcile(&pool).await;
+
         let duration = Duration::from_secs(60);
 
         println!("sleeping for {duration:?}");

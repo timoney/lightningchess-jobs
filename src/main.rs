@@ -1,9 +1,10 @@
-mod check_lnd;
-mod check_lichess_games;
+mod subscribe_lnd;
+mod db_checks;
+mod reconcile_invoices;
 mod models;
 
-use crate::check_lnd::subscribe_invoices;
-use crate::check_lichess_games::check_lichess_games;
+use crate::subscribe_lnd::subscribe_invoices;
+use crate::db_checks::db_checks;
 
 #[tokio::main]
 async fn main() {
@@ -11,7 +12,7 @@ async fn main() {
         subscribe_invoices().await
     });
 
-    check_lichess_games().await;
+    db_checks().await;
 
     subscribe_task.await.unwrap();
 }
